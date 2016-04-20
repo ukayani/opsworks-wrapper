@@ -8,8 +8,6 @@ A simple wrapper for aws-sdk to make handling opsworks operations easier.
 - Deployment Creation for all layers except a specified layer (exclusion by layer name)
 - Retrieve all instances for a given layer name
 
-TODO: Delete this and the text above, and describe your gem
-
 ## Installation
 
 Add this line to your application's Gemfile:
