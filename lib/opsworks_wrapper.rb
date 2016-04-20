@@ -17,8 +17,12 @@ module OpsworksWrapper
       @opsworks_app ||= get_opsworks_app
     end
 
-    def client
-      @client ||= Aws::OpsWorks::Client.new
+    def opsworks_client
+      @opsworks_client ||= Aws::OpsWorks::Client.new
+    end
+
+    def load_balancer_client
+      @client ||= Aws::ElasticLoadBalancing::Client.new
     end
 
     def app_id
@@ -30,7 +34,7 @@ module OpsworksWrapper
     end
 
     def get_opsworks_layers
-      data = client.describe_layers(stack_id: opsworks_app[:stack_id])
+      data = opsworks_client.describe_layers(stack_id: opsworks_app[:stack_id])
       layers = {}
       data.layers.each do |layer|
         layers[layer.name] = layer
@@ -39,7 +43,7 @@ module OpsworksWrapper
     end
 
     def get_opsworks_app
-      data = client.describe_apps(app_ids: [app_id])
+      data = opsworks_client.describe_apps(app_ids: [app_id])
       unless data[:apps] && data[:apps].count == 1
         raise Error, "App #{app_id} not found.", error.backtrace
       end
@@ -48,13 +52,24 @@ module OpsworksWrapper
 
     def get_instances(layer_name = nil)
       if layer_name == nil
-        data = client.describe_instances(stack_id: opsworks_app[:stack_id])
+        data = opsworks_client.describe_instances(stack_id: opsworks_app[:stack_id])
       else
         layer_id = layers[layer_name].layer_id
-        data = client.describe_instances(layer_id: layer_id)
+        data = opsworks_client.describe_instances(layer_id: layer_id)
       end
 
       data.instances
+    end
+
+    def get_elb(layer_name)
+      layer_id = layers[layer_name].layer_id
+      elbs = opsworks_client.describe_elastic_load_balancers(layer_ids:[layer_id])
+      if elbs.elastic_load_balancers.size > 0
+        name = elbs.elastic_load_balancers.first.elastic_load_balancer_name
+        ELB.new(name)
+      else
+        nil
+      end
     end
 
     # update cookbooks on all layers
@@ -74,6 +89,19 @@ module OpsworksWrapper
       end
 
       create_deployment({name: 'deploy'}, instance_ids, timeout)
+    end
+
+    def roll_instance(instance, elb, timeout = 600)
+      if !elb.nil?
+        elb.remove_instance(instance)
+      end
+
+      create_deployment({name: 'deploy'}, [instance.instance_id], timeout)
+
+      if !elb.nil?
+        elb.add_instance(instance)
+      end
+
     end
 
     # deploy to all layers except specified layer
@@ -99,8 +127,7 @@ module OpsworksWrapper
           comment: "Git Sha: #{current_sha}"
       }
 
-      deployment = client.create_deployment(deployment_config)
-      puts "Deployment created: #{deployment[:deployment_id]}".blue
+      deployment = opsworks_client.create_deployment(deployment_config)
       puts "Running Command: #{command[:name]} ".light_blue
 
       begin
@@ -115,7 +142,7 @@ module OpsworksWrapper
 
     # Waits on the provided deployment for specified timeout (seconds)
     def wait_until_deployed(deployment_id, timeout)
-      client.wait_until(:deployment_successful, deployment_ids: [deployment_id]) do |w|
+      opsworks_client.wait_until(:deployment_successful, deployment_ids: [deployment_id]) do |w|
         w.before_attempt do |attempt|
           puts "Attempt #{attempt} to check deployment status".light_black
         end
@@ -124,6 +151,97 @@ module OpsworksWrapper
       end
     end
     private :wait_until_deployed
+  end
+
+  class ELB
+    require 'aws-sdk'
+    require 'colorize'
+
+    def initialize(name)
+      @name = name
+    end
+
+    def name
+      @name
+    end
+
+    def client
+      @client ||= Aws::ElasticLoadBalancing::Client.new
+    end
+
+    def attributes
+      @attributes ||= client.describe_load_balancer_attributes(load_balancer_name: name)
+    end
+
+    def health_check
+      elb = client.describe_load_balancers(load_balancer_names: [name]).load_balancer_descriptions.first
+      @health_check ||= elb.health_check
+    end
+
+    def wait_for_connection_draining
+      connection_draining = attributes.load_balancer_attributes.connection_draining
+      if connection_draining.enabled
+        timeout = connection_draining.timeout
+        puts "Connection Draining Enabled - sleeping for #{timeout}".light_black
+        sleep(timeout)
+      else
+        puts "Connection Draining Disabled - sleeping for 20 seconds".light_black
+        sleep(20)
+      end
+    end
+
+    def wait_for_instance_health_check(instance)
+      health_threshold = health_check.healthy_threshold
+      interval = health_check.interval
+
+      # wait a little longer than the defined threshold to account for application launch time
+      timeout = ((health_threshold + 2) * interval)
+
+      begin
+        client.wait_until(:instance_in_service, {load_balancer_name: name,
+                                                 instances: [{instance_id: instance.ec2_instance_id}]}) do |w|
+          w.before_attempt do |attempt|
+            puts "Attempt #{attempt} to check health status for #{instance.hostname}".light_black
+          end
+          w.interval = 10
+          w.max_attempts = timeout / w.interval
+        end
+        puts "Instance #{instance.hostname} is now InService".green
+        true
+      rescue Aws::Waiters::Errors::WaiterFailed => e
+        puts "Instance #{instance.hostname} failed to move to InService, #{e.message}".red
+        false
+      end
+
+    end
+
+    def remove_instance(instance)
+      deregister_response = client.deregister_instances_from_load_balancer(load_balancer_name: name,
+                                                                           instances: [{instance_id: instance.ec2_instance_id}])
+      remaining_instance_count = deregister_response.instances.size
+      puts "Removed #{instance.hostname} from ELB #{name}. Remaining instances: #{remaining_instance_count}".light_blue
+      wait_for_connection_draining
+    end
+
+    def add_instance(instance)
+      register_response = client.register_instances_with_load_balancer(load_balancer_name: name,
+                                                                       instances: [{instance_id: instance.ec2_instance_id}])
+      remaining_instance_count = register_response.instances.size
+      puts "Added #{instance.hostname} to ELB #{name}. Attached instances: #{remaining_instance_count}".light_blue
+      wait_for_instance_health_check(instance)
+    end
+
+    def is_instance_healthy(instance)
+      instance_health = client.describe_instance_health(load_balancer_name: name,
+                                                        instances: [{instance_id: instance.ec2_instance_id}])
+      state_info = instance_health.instance_states.first
+      status_detail = ''
+      if state_info.state != 'InService'
+        status_detail = "#{state_info.reason_code} - #{state_info.description}."
+      end
+      puts "Instance state is #{state_info.state} #{status_detail}"
+      state_info.state == 'InService'
+    end
 
   end
 end
