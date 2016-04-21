@@ -75,7 +75,11 @@ opsworks.deploy_layer_rolling('Frontend')
 ### Update Custom Cookbooks
 
 ```ruby
-...
+require 'aws-sdk'
+require 'opsworks_wrapper'
+
+ACCESS_KEY = "yourAccessKey"
+SECRET_KEY = "yourSecretKey"
 OPSWORKS_APP_ID = "yourAppID"
 
 # update AWS credentials
