@@ -82,13 +82,13 @@ module OpsworksWrapper
     def deploy(layer_name = nil, timeout = 600)
       if layer_name
         puts "Deploying on #{layer_name} layer".light_white.bold
-        instance_ids = get_instances(layer_name).map(&:instance_id)
+        instances = get_instances(layer_name)
       else
         puts "Deploying on all layers".light_white.bold
-        instance_ids = nil
+        instances = nil
       end
 
-      create_deployment({name: 'deploy'}, instance_ids, timeout)
+      create_deployment({name: 'deploy'}, instances, timeout)
     end
 
     def roll_instance(instance, elb, timeout = 600)
@@ -96,7 +96,7 @@ module OpsworksWrapper
         elb.remove_instance(instance)
       end
 
-      create_deployment({name: 'deploy'}, [instance.instance_id], timeout)
+      create_deployment({name: 'deploy'}, [instance], timeout)
 
       if !elb.nil?
         elb.add_instance(instance)
@@ -111,14 +111,22 @@ module OpsworksWrapper
     end
 
     def create_deployment_exclude(command, layer_to_exclude, timeout)
-      all_instance_ids = get_instances.map(&:instance_id)
-      excluded_instance_ids = get_instances(layer_to_exclude).map(&:instance_id)
-      included_instance_ids = all_instance_ids - excluded_instance_ids
+      all_instances = get_instances
+      excluded_instances = get_instances(layer_to_exclude)
+      included_instances = all_instances - excluded_instances
 
-      create_deployment(command, included_instance_ids, timeout)
+      create_deployment(command, included_instances, timeout)
     end
 
-    def create_deployment(command, instance_ids, timeout)
+    def create_deployment(command, instances, timeout)
+      instance_ids = nil
+      instance_description = "all instances"
+
+      if !instances.nil?
+        instance_ids = instances.map(&:instance_id)
+        instance_description = instances.map(&:hostname).join(',')
+      end
+
       deployment_config = {
           stack_id: opsworks_app[:stack_id],
           app_id: app_id,
@@ -128,7 +136,9 @@ module OpsworksWrapper
       }
 
       deployment = opsworks_client.create_deployment(deployment_config)
-      puts "Running Command: #{command[:name]} ".light_blue
+      print "Running command ".light_blue
+      print "#{command[:name]}".light_blue.bold
+      puts " on #{instance_description}".light_blue
 
       begin
         wait_until_deployed(deployment[:deployment_id], timeout)
