@@ -242,7 +242,8 @@ module OpsworksWrapper
       @health_check ||= elb.health_check
     end
 
-    def wait_for_connection_draining
+    # Determines if elb has connection draining enabled and waits for the timeout period or (20s) default
+    def _wait_for_connection_draining
       connection_draining = attributes.load_balancer_attributes.connection_draining
       if connection_draining.enabled
         timeout = connection_draining.timeout
@@ -254,7 +255,10 @@ module OpsworksWrapper
       end
     end
 
-    def wait_for_instance_health_check(instance)
+    # Waits on instance to be in service according to the ELB
+    # @param [Object] instance
+    # @return [Boolean]
+    def _wait_for_instance_health_check(instance)
       health_threshold = health_check.healthy_threshold
       interval = health_check.interval
 
@@ -279,22 +283,30 @@ module OpsworksWrapper
 
     end
 
+    # Removes instance from ELB and waits for connection draining
+    # @param [Object] instance - object with ec2_instance_id and hostname
     def remove_instance(instance)
       deregister_response = client.deregister_instances_from_load_balancer(load_balancer_name: name,
                                                                            instances: [{instance_id: instance.ec2_instance_id}])
       remaining_instance_count = deregister_response.instances.size
       puts "Removed #{instance.hostname} from ELB #{name}. Remaining instances: #{remaining_instance_count}".light_blue
-      wait_for_connection_draining
+      _wait_for_connection_draining
     end
 
+    # Adds instance to ELB and waits for instance health check to pass
+    # @param [Object] instance - object with ec2_instance_id and hostname
+    # @return [Boolean]
     def add_instance(instance)
       register_response = client.register_instances_with_load_balancer(load_balancer_name: name,
                                                                        instances: [{instance_id: instance.ec2_instance_id}])
       remaining_instance_count = register_response.instances.size
       puts "Added #{instance.hostname} to ELB #{name}. Attached instances: #{remaining_instance_count}".light_blue
-      wait_for_instance_health_check(instance)
+      _wait_for_instance_health_check(instance)
     end
 
+    # Checks whether an instance attached to ELB is healthy
+    # @param [Object] instance - object with ec2_instance_id and hostname
+    # @return [Boolean]
     def is_instance_healthy(instance)
       instance_health = client.describe_instance_health(load_balancer_name: name,
                                                         instances: [{instance_id: instance.ec2_instance_id}])
