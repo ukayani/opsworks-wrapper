@@ -91,7 +91,15 @@ module OpsworksWrapper
       create_deployment({name: 'deploy'}, instances, timeout)
     end
 
-    def roll_instance(instance, elb, timeout = 600)
+    def deploy_layer_rolling(layer_name, timeout = 600)
+      instances = get_instances(layer_name)
+      elb = get_elb(layer_name)
+      instances.each do |instance|
+        deploy_instance_rolling(instance, elb, timeout)
+      end
+    end
+
+    def deploy_instance_rolling(instance, elb, timeout = 600)
       if !elb.nil?
         elb.remove_instance(instance)
       end
@@ -101,7 +109,6 @@ module OpsworksWrapper
       if !elb.nil?
         elb.add_instance(instance)
       end
-
     end
 
     # deploy to all layers except specified layer
