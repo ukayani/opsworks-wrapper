@@ -1,5 +1,3 @@
-require "opsworks_wrapper/version"
-
 module OpsworksWrapper
   class Deployer
     require 'aws-sdk'
